@@ -1,0 +1,1135 @@
+---
+title: "Threshold_model"
+author: "Martin-Junior ADECHI"
+date: "2026-04-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Fonctions spéciales
+```{r}
+library(pracma)
+# =========================
+# Fonction eta (stable)
+# =========================
+eta <- function(r, alpha){
+  -tan(pi*alpha/2) * r^alpha   # r > 0 donc sign(r)=1
+}
+
+# =========================
+# Intégrale générique (robuste)
+# =========================
+core_integral <- function(x, d, alpha, beta, trig = "cos", log_term = FALSE, corrected = FALSE){
+
+  # Fonction scalaire pour un seul t
+  scalar_integrand <- function(t){
+    # seuil critique
+    if(t < 1e-8){
+      power <- (d + 2)/alpha - 1
+      return(-0.5 * x^2 * (1/alpha) * t^power)
+    }
+    
+    # Changement de variable
+    r <- t^(1/alpha)
+    dr_dt <- (1/alpha) * t^(1/alpha - 1)
+    
+    # Angle
+    angle <- x * r + beta * eta(r, alpha)
+    if(!is.finite(angle)){
+      angle <- 0
+    } else {
+      angle <- angle %% (2*pi)
+    }
+    
+    # Partie trigonométrique
+    trig_part <- if(trig == "cos") cos(angle) else sin(angle)
+    
+    # Correction pour d <= 0
+    if(corrected){
+      if(trig == "cos"){
+        trig_part <- trig_part - 1
+      } else {
+        trig_part <- trig_part - x * r
+      }
+    }
+    
+    # Terme logarithmique
+    if(log_term){
+      trig_part <- trig_part * log(r)
+    }
+    
+    # Intégrande final
+    val <- trig_part * r^(d-1) * exp(-t) * dr_dt
+    
+    return(val)
+  }
+  
+  integrate(Vectorize(scalar_integrand), lower = 0, upper = Inf, subdivisions = 2000)$value
+  # capture.output(
+  #   res <- pracma::integral(Vectorize(scalar_integrand), 0, Inf)
+  # )
+  # res
+}
+
+# =========================
+# Wrappers propres
+# =========================
+
+# g_d
+g_d <- function(x, d, alpha, beta){
+  if(d > 0){
+    core_integral(x, d, alpha, beta, trig="cos")
+  } else {
+    core_integral(x, d, alpha, beta, trig="cos", corrected=TRUE)
+  }
+}
+
+# g_d tilde
+g_d_tilde <- function(x, d, alpha, beta){
+  if(d > -min(1, alpha)){
+    core_integral(x, d, alpha, beta, trig="sin")
+  } else {
+    core_integral(x, d, alpha, beta, trig="sin", corrected=TRUE)
+  }
+}
+
+# h_d (log cos)
+h_d <- function(x, d, alpha, beta){
+  core_integral(x, d, alpha, beta, trig="cos", log_term=TRUE)
+}
+
+# h_d tilde (log sin)
+h_d_tilde <- function(x, d, alpha, beta){
+  core_integral(x, d, alpha, beta, trig="sin", log_term=TRUE)
+}
+
+# =========================
+# Vectorisation
+# =========================
+g_d        <- Vectorize(g_d)
+g_d_tilde  <- Vectorize(g_d_tilde)
+h_d        <- Vectorize(h_d)
+h_d_tilde  <- Vectorize(h_d_tilde)
+
+```
+
+
+
+
+```{r}
+# =========================================
+# Librairies nécessaires
+# =========================================
+library(stabledist)  # pour rstable, qstable, dstable, pstable
+
+# =========================================
+# Paramètres vrais du stable
+# =========================================
+alpha_true <- 1.5
+beta_true  <- 0
+gamma_true <- 1
+zeta_true  <- 0
+
+# Paramètres du modèle spliced
+lambda <- 0.2      
+m <- 10 
+p <- 0.2
+n <- 5e4     # taille de l'échantillon
+
+# -------------------------
+# Topp-Leone Exponential
+fB <- function(x) {
+  2*m*lambda*exp(-2*lambda*x) * (1 - exp(-2*lambda*x))^(m-1)
+}
+
+FB <- function(x) {
+  (1 - exp(-2*lambda*x))^m
+}
+
+qB <- function(u) {
+  - (1 / (2*lambda)) * log(1 - u^(1/m))
+}
+
+# Partie haute : Stable param 0
+fT <- function(x, alpha, beta, gamma, zeta) dstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+FT <- function(x, alpha, beta, gamma, zeta) pstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+qT <- function(u, alpha, beta, gamma, zeta) qstable(u, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+
+# =========================================
+# Fonctions utilitaires
+# =========================================
+
+# Fonction de superquantile empirique
+superquantile_emp <- function(x, p){
+  q <- quantile(x, probs = p)
+  mean(x[x > q])
+}
+
+# Simulation d'un échantillon du modèle spliced
+simulate_spliced <- function(n, p,m,lambda,
+                             alpha, beta, gamma, zeta){
+  
+  # Seuil continuité
+  g <- function(u) (p*fB(u)/FB(u)) - 
+    ((1-p)*fT(u,alpha_true, beta_true, gamma_true, zeta_true)/(1-FT(u, alpha_true, beta_true, gamma_true, zeta_true)))
+  uc <- uniroot(g, lower=0.01, upper=20)$root
+  
+  # U0 pour choisir body/tail
+  U0 <- runif(n)
+  U1 <- runif(n)
+  X <- numeric(n)
+  
+    for(i in 1:n){
+    if(U0[i] <= p){
+      X[i] <- qB(U1[i]*FB(uc))
+    } else{
+      v <- FT(uc, alpha_true, beta_true, gamma_true, zeta_true) + U1[i]*(1-FT(uc, alpha_true, beta_true, gamma_true, zeta_true))
+      X[i] <- qT(v, alpha_true, beta_true, gamma_true, zeta_true)
+    }
+  }
+    
+  return(X)
+}
+
+# =========================================
+# Fonction objectif pour l'optimisation
+# =========================================
+# Nous cherchons (alpha,beta,gamma,zeta) qui minimisent l'écart entre SQ-Q et
+# la formule théorique H(Q, alpha, beta, gamma, zeta)
+objective_function <- function(params, Qs, SQs){
+  alpha <- params[1]
+  beta  <- params[2]
+  gamma <- params[3]
+  zeta  <- params[4]
+  
+  # On évite alpha <= 0 pour stabilité
+  if(alpha <= 0 || gamma <= 0 || abs(beta) > 1) return(1e10)
+
+  # éviter singularités
+  if(abs(alpha - 1) < 1e-2) return(1e10)
+  
+  # éviter gamma poles
+  if(abs(1/alpha - round(1/alpha)) < 1e-2) return(1e10)
+  
+  err <- 0
+  for(i in 1:length(Qs)){
+    Q <- Qs[i]
+    P_T_Q <- pstable(Q, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0, lower.tail = FALSE)
+    z = (Q - zeta + beta*gamma*tan(pi*alpha/2))/gamma
+    # H(Q,alpha,beta,gamma,zeta) 
+    H_val <- (zeta - beta * gamma * tan(pi*alpha/2)-Q) / (2*P_T_Q) + (gamma/(pi*P_T_Q)) * (gamma(1 - 1/alpha) - g_d(x=z, d=-1, alpha = alpha, beta = beta))
+    # erreur
+    err <- err + (SQs[i] - Q - H_val)^2
+  }
+  
+  return(err)
+}
+
+# =========================================
+# Simulation
+# =========================================
+set.seed(123)
+X <- simulate_spliced(n, p, m,lambda,
+                      alpha_true, beta_true, gamma_true, zeta_true)
+
+# Niveaux de probabilité
+prob_levels <- c(0.5, 0.55, 0.52, 0.45)
+
+# Quantiles et superquantiles empiriques
+Q_hat <- sapply(prob_levels, function(p) quantile(X, p))
+SQ_hat <- sapply(prob_levels, function(p) superquantile_emp(X, p))
+
+# =========================================
+# Optimisation numérique
+# =========================================
+# Initialisation
+init_params <- c(alpha=1.2, beta=0, gamma=1, zeta=0)
+
+res <- optim(par = init_params,
+             fn = objective_function,
+             Qs = Q_hat,
+             SQs = SQ_hat,
+             method = "L-BFGS-B",
+             lower = c(0.01, -1, 0.01, -Inf),
+             upper = c(2, 1, 5, Inf))
+
+# Paramètres estimés
+alpha_hat <- res$par[1]
+beta_hat  <- res$par[2]
+gamma_hat <- res$par[3]
+zeta_hat <- res$par[4]
+
+cat("Paramètres vrais : ", alpha_true, beta_true, gamma_true, zeta_true, "\n")
+cat("Paramètres estimés : ", alpha_hat, beta_hat, gamma_hat, zeta_hat, "\n")
+```
+
+
+```{r}
+library(statmod)
+g_minus_1 <- function(x,alpha, beta){
+  scalar_integrand <- function(t){
+    r <- t^(1/alpha)
+    dr_dt <- (1/alpha) * t^(1/alpha - 1)
+    
+    trig_part <- cos(x*r - tan(pi*alpha/2)*beta*r^alpha) - 1
+    
+    val <- trig_part * r^(-2) * dr_dt
+    
+    return(val)
+  }
+  
+  n <- 200
+  gl <- statmod::gauss.quad(n, kind = "laguerre",alpha = 0)
+  t <- gl$nodes
+  w <- gl$weights
+
+  sum(w * sapply(t, scalar_integrand))  
+}
+```
+
+
+
+```{r}
+library(stabledist) 
+# Topp-Leone Exponential
+fB <- function(x,m,lambda) {
+  m*lambda*exp(-lambda*x) * (1 - exp(-lambda*x))^(m-1)
+}
+
+FB <- function(x,m,lambda) {
+  (1 - exp(-lambda*x))^m
+}
+
+qB <- function(u,m,lambda) {
+  - (1 / (lambda)) * log(1 - u^(1/m))
+}
+
+# Partie haute : Stable param 0
+fT <- function(x, alpha, beta, gamma, zeta) dstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+FT <- function(x, alpha, beta, gamma, zeta) pstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+qT <- function(u, alpha, beta, gamma, zeta) qstable(u, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+
+simulate_spliced <- function(n, params){
+  p = params[1]
+  m = params[2]
+  lambda = params[3]
+  alpha = params[4]
+  beta = params[5]
+  gamma = params[6]
+  zeta = params[7]
+  # Seuil continuité
+  g <- function(u) (p*fB(u,m,lambda)/FB(u,m,lambda)) - 
+    ((1-p)*fT(u,alpha, beta, gamma, zeta)/(1-FT(u, alpha, beta, gamma, zeta)))
+  uc <- uniroot(g, lower=0.01, upper=20)$root
+  
+  # U0 pour choisir body/tail
+  U0 <- runif(n)
+  U1 <- runif(n)
+  X <- numeric(n)
+  
+    for(i in 1:n){
+    if(U0[i] <= p){
+      X[i] <- qB(U1[i]*FB(uc,m,lambda),m,lambda)
+    } else{
+      v <- FT(uc, alpha, beta, gamma, zeta) + U1[i]*(1-FT(uc, alpha, beta, gamma, zeta))
+      X[i] <- qT(v, alpha, beta, gamma, zeta)
+    }
+  }
+    
+  return(X)
+}
+
+# Fonction de superquantile empirique
+superquantile_emp <- function(x, p){
+  q <- quantile(x, probs = p)
+  mean(x[x > q])
+} 
+
+quantile_superquantile_estim <- function(Qs, SQs){
+  
+    objective_function <- function(params, Qs, SQs){
+      alpha <- params[1]
+      beta  <- params[2]
+      gamma <- params[3]
+      zeta  <- params[4]
+      
+      # On évite alpha <= 0 pour stabilité
+      if(alpha <= 0 || gamma <= 0 || abs(beta) > 1) return(1e10)
+    
+      # éviter singularités
+      if(abs(alpha - 1) < 1e-2) return(1e10)
+      
+      # éviter gamma poles
+      if(abs(1/alpha - round(1/alpha)) < 1e-2) return(1e10)
+  
+      
+      err <- 0
+      for(i in 1:length(Qs)){
+        Q <- Qs[i]
+        suppressWarnings(
+          P_T_Q <- pstable(Q, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0, lower.tail = FALSE)
+        )
+        
+        z = (Q - zeta + beta*gamma*tan(pi*alpha/2))/gamma
+        # H(Q,alpha,beta,gamma,zeta)
+        H_val <- (zeta - beta * gamma * tan(pi*alpha/2)-Q) / (2*P_T_Q) + (gamma/(pi*P_T_Q)) * (gamma(1 - 1/alpha) - g_minus_1(x=z, alpha = alpha, beta = beta))
+        # erreur
+        err <- err + (SQs[i] - Q - H_val)^2
+
+        
+      }
+      if (any(!is.finite(err))) return(1e10)
+      
+      return(err)
+    }
+    
+    init_params <- c(alpha=1.2, beta=0, gamma=1, zeta=0)
+
+    res <- optim(par = init_params,
+             fn = objective_function,
+             Qs = Qs,
+             SQs = SQs,
+             method = "L-BFGS-B",
+             lower = c(1.01, -1, 0.01, -Inf),
+             upper = c(2, 1, 10, Inf))
+
+    return(res$par)
+}
+
+
+simulation <- function(n, true_params, replications=50, prob_levels){
+  # params is the true parameters of stable component
+  results <- matrix(NA, nrow = replications, ncol = 4)
+  
+  for (i in 1:replications) {
+    sample <-simulate_spliced(n, c(0.2, 10, 0.2, true_params))
+    Q_hat <- sapply(prob_levels, function(p) quantile(sample, p))
+    SQ_hat <- sapply(prob_levels, function(p) superquantile_emp(sample, p))
+    
+    estimation <- quantile_superquantile_estim(Q_hat, SQ_hat)
+    if (!is.null(estimation)) {
+      results[i, ] <- estimation
+    }
+    else results[i, ] <- c(NA,NA,NA,NA,NA,NA)
+  }
+  colnames(results) <- c( "alpha","beta","gamma" , "delta")
+  # Calcul des métriques
+ 
+  true_matrix <- matrix(rep(true_params, each = replications), nrow = replications)
+  
+  mean_estimates <- colMeans(results, na.rm = TRUE)
+  biases <- abs(mean_estimates - true_params)
+  mse <- colMeans((results - true_matrix)^2, na.rm = TRUE)
+  variances <- apply(results, 2, var, na.rm = TRUE)
+  
+  return(data.frame(Mean_Estimate = mean_estimates,
+                    Bias = biases,
+                    MSE = mse,
+                    Variance = variances))
+  
+}
+
+```
+
+## Estimation paramètres
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21 <- simulation(250,true_params=params[2,], prob_levels = seq(0.2,0.9,.1))
+sim_result_22 <- simulation(1e3,true_params=params[2,], prob_levels = seq(0.2,0.9,.1))
+
+print(sim_result_21)
+print(sim_result_22)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_11 <- simulation(250,true_params=params[1,],prob_levels = seq(0.2,0.9,.1))
+                             
+sim_result_12 <- simulation(1e3,true_params=params[1,],prob_levels = seq(0.2,0.9,.1))
+
+print(sim_result_11)
+print(sim_result_12)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21_v2 <- simulation(250,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+sim_result_22_v2 <- simulation(1e3,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+
+print(sim_result_21_v2)
+print(sim_result_22_v2)
+```
+
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_11_v2 <- simulation(250,true_params=params[1,],prob_levels = c(0.45,0.50,0.55,0.52))
+                             
+sim_result_12_v2 <- simulation(1e3,true_params=params[1,],prob_levels = c(0.45,0.50,0.55,0.52))
+
+print(sim_result_11_v2)
+print(sim_result_12_v2)
+```
+
+
+## Lemme 3.2 estimation
+
+```{r}
+library(stabledist)
+
+# ================================================================
+# FONCTIONS DE BASE
+# ================================================================
+fB <- function(x, m, theta)
+  m * theta * exp(-theta*x) * (1 - exp(-theta*x))^(m-1)
+FB <- function(x, m, theta)
+  (1 - exp(-theta*x))^m
+qB <- function(u, m, theta)
+  -(1/theta) * log(1 - u^(1/m))
+fT <- function(x, al, be, ga, ze)
+  dstable(x, alpha=al, beta=be, gamma=ga, delta=ze, pm=0)
+FT <- function(x, al, be, ga, ze)
+  pstable(x, alpha=al, beta=be, gamma=ga, delta=ze, pm=0)
+
+simulate_spliced <- function(n, params) {
+  p=params[1]; m=params[2]; theta=params[3]
+  al=params[4]; be=params[5]; ga=params[6]; ze=params[7]
+  g <- function(u){
+    hB <- fB(u,m,theta)/FB(u,m,theta) 
+    hT <- fT(u,al,be,ga,ze)/(1-FT(u,al,be,ga,ze))
+    hB_safe <- ifelse(is.nan(hB),0,hB)
+    p* hB_safe - (1-p)*hT
+  }
+    
+  mode_B <- if(m > 1) log(m)/theta else 1/theta
+  upper_u <- max(50, mode_B * 20, ze)
+  uc <- uniroot(g, lower=0.01, upper=upper_u, tol=1e-10)$root
+  U0 <- runif(n); U1 <- runif(n); X <- numeric(n)
+  for(i in 1:n) {
+    if(U0[i] <= p) {
+      X[i] <- qB(U1[i]*FB(uc,m,theta), m, theta)
+    } else {
+      v    <- FT(uc,al,be,ga,ze) + U1[i]*(1-FT(uc,al,be,ga,ze))
+      X[i] <- qstable(v, alpha=al, beta=be, gamma=ga, delta=ze, pm=0)
+    }
+  }
+  X
+}
+
+# ================================================================
+# ÉTAPE 1 : IM_q par intégration numérique (stable pour tout m,θ)
+# ================================================================
+IM_q_numint <- function(Qp, m, theta, q) {
+  if(Qp <= 0 || !is.finite(Qp)) return(NA_real_)
+  integrand <- function(x) {
+    vals <- x^q * fB(x, m, theta)
+    vals[!is.finite(vals)] <- 0
+    vals
+  }
+  lower_lim <- if(m < 1) 1e-10 else 0
+  tryCatch({
+    num   <- integrate(integrand, lower=lower_lim, upper=Qp,
+                       subdivisions=500, rel.tol=1e-6)$value
+    denom <- FB(Qp, m, theta)
+    if(!is.finite(num) || denom < 1e-300) NA_real_ else num/denom
+  }, error=function(e) NA_real_)
+}
+
+# ================================================================
+# ÉTAPE 2 : Estimation (m,θ) par matching des IM
+#           sur observations corps uniquement
+# ================================================================
+incomplete_moment_estim <- function(x_body,
+                                       q_values = c(0.5, 1, 1.5, 2),
+                                       prob_body = seq(0.1, 0.9, by=0.1),
+                                       init_pars = NULL,
+                                       verbose   = FALSE) {
+  
+  # Quantiles des observations corps directement
+  Q_body_emp <- as.numeric(quantile(x_body, probs=prob_body))
+  
+  # Moments incomplets empiriques sur observations corps
+  # E_emp[B^q | B ≤ Q_p^body] = mean(x_body[x_body ≤ Q_p]^q)
+  Imq_emp <- unlist(lapply(q_values, function(q)
+    sapply(Q_body_emp, function(Q)
+      mean(x_body[x_body <= Q]^q)
+    )
+  ))
+  
+  # Vérification dimensions
+  expected <- length(q_values) * length(Q_body_emp)
+  stopifnot(length(Imq_emp) == expected)
+  
+  # Objectif : erreur relative au carré (invariance d'échelle)
+  objective <- function(pars) {
+    m_    <- pars[1]; theta_ <- pars[2]
+    if(m_ <= 0 || theta_ <= 0) return(1e10)
+    
+    err <- 0; idx <- 1
+    for(q in q_values) {
+      for(Q in Q_body_emp) {
+        th_val  <- IM_q_numint(Q, m_, theta_, q)
+        emp_val <- Imq_emp[idx]
+        if(!is.na(th_val) && is.finite(th_val) &&
+           is.finite(emp_val) && abs(emp_val) > 1e-300) {
+          err <- err + ((emp_val - th_val) / emp_val)^2
+        }
+        idx <- idx + 1
+      }
+    }
+    if(!is.finite(err)) 1e10 else err
+  }
+  
+  # Init data-driven si non fournie
+  if(is.null(init_pars))
+    init_pars <- c(2,1.5)
+  
+  if(verbose)
+    cat(sprintf("Init IM-matching : m=%.3f, theta=%.6f\n",
+                init_pars["m"], init_pars["theta"]))
+  
+  opt <- tryCatch(
+    optim(init_pars, objective, method="L-BFGS-B",
+          lower=c(0.01, 1e-7), upper=c(Inf, Inf),
+          control=list(maxit=2000, factr=1e5, pgtol=1e-9)),
+    error=function(e) list(par=init_pars, value=Inf)
+  )
+  
+  names(opt$par) <- c("m","theta")
+  opt$par
+}
+
+# ================================================================
+# FONCTION PRINCIPALE D'INITIALISATION CORPS
+# ================================================================
+init_body <- function(x, p_init, verbose=TRUE) {
+  
+  x_body <- sort(x[x <= quantile(x, p_init)])
+  
+  theta_B <- incomplete_moment_estim(
+    x_body  = x_body,
+    q_values = c(0.5, 1, 1.5, 2),
+    prob_body = seq(0.1, 0.9, by=0.1),
+    verbose  = verbose
+  )
+  
+  if(verbose)
+    cat(sprintf("Résultat : m=%.4f, theta=%.6f\n",
+                theta_B["m"], theta_B["theta"]))
+  theta_B
+}
+
+# ================================================================
+# SIMULATION DE MONTE CARLO
+# ================================================================
+Bsimulation <- function(n, true_params, replications=50,
+                           p_init=0.2, verbose=FALSE) {
+  results  <- matrix(NA, nrow=replications, ncol=2)
+  colnames(results) <- c("m","theta")
+  
+  for(i in 1:replications) {
+    sim_i <- tryCatch(
+      simulate_spliced(n, c(p_init, true_params, 1.5, 0.5, 1,100)),
+      error=function(e) list(X=rep(NA,n))
+    )
+    if(all(is.na(sim_i))) next
+    
+    est <- tryCatch(
+      init_body(sim_i, p_init, verbose=verbose),
+      error=function(e) c(m=NA, theta=NA)
+    )
+    results[i,] <- est
+    
+    if(verbose && i %% 10 == 0)
+      cat(sprintf("  Rep %3d/%d : m=%.3f (vrai=%.3f), theta=%.5f (vrai=%.5f)\n",
+                  i, replications, est["m"], true_params[1],
+                  est["theta"], true_params[2]))
+  }
+  
+  true_mat <- matrix(rep(true_params, each=replications), nrow=replications)
+  m_est    <- colMeans(results, na.rm=TRUE)
+  
+  data.frame(
+    Vraie_val    = true_params,
+    Moy_est      = round(m_est, 5),
+    Biais    = round(abs(m_est - true_params), 5),
+    MSE          = round(colMeans((results-true_mat)^2, na.rm=TRUE), 7),
+    Variance     = round(apply(results, 2, var, na.rm=TRUE), 7),
+    n_valid      = c(sum(!is.na(results[,1])), sum(!is.na(results[,2])))
+  )
+}
+```
+
+
+```{r}
+params_body = matrix(c(10, 0.7, 2, 1.2), nrow=2, byrow=T)
+sim_result_b21 <- Bsimulation(1e3,true_params=params_body[2,])
+print(sim_result_b21)
+```
+```{r}
+params_body = matrix(c(10, 0.7, 2, 1.2), nrow=2, byrow=T)
+sim_result_b22 <- Bsimulation(2e3,true_params=params_body[2,])
+print(sim_result_b22)
+```
+
+
+```{r}
+params_body = matrix(c(10, 0.7, 2, 1.2), nrow=2, byrow=T)
+sim_result_b11 <- Bsimulation(1e3,true_params=params_body[1,])
+print(sim_result_b11)
+```
+
+```{r}
+params_body = matrix(c(10,0.7, 2, 1.2), nrow=2, byrow=T)
+sim_result_b12 <- Bsimulation(2e3,true_params=params_body[1,])
+print(sim_result_b12)
+```
+
+
+
+
+## Lemme 3.1 (Subgradient Descent for Empirical Superquantile Estimation & Smoothed Superquantile Optimization)
+
+```{r}
+library(stabledist)
+library(statmod)
+g_minus_1 <- function(x,alpha, beta){
+  scalar_integrand <- function(t){
+    # Changement de variable
+    r <- t^(1/alpha)
+    dr_dt <- (1/alpha) * t^(1/alpha - 1)
+    
+    trig_part <- cos(x*r - tan(pi*alpha/2)*beta*r^alpha) - 1
+    
+    val <- trig_part * r^(-2) * dr_dt
+    
+    return(val)
+  }
+  
+  n <- 200
+  gl <- statmod::gauss.quad(n, kind = "laguerre",alpha = 0)
+  t <- gl$nodes
+  w <- gl$weights
+
+  sum(w * sapply(t, scalar_integrand))  
+}
+# Topp-Leone Exponential
+fB <- function(x,m,lambda) {
+  2*m*lambda*exp(-2*lambda*x) * (1 - exp(-2*lambda*x))^(m-1)
+}
+
+FB <- function(x,m,lambda) {
+  (1 - exp(-2*lambda*x))^m
+}
+
+qB <- function(u,m,lambda) {
+  - (1 / (2*lambda)) * log(1 - u^(1/m))
+}
+
+# Partie haute : Stable param 0
+fT <- function(x, alpha, beta, gamma, zeta) dstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+FT <- function(x, alpha, beta, gamma, zeta) pstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+qT <- function(u, alpha, beta, gamma, zeta) qstable(u, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+
+simulate_spliced <- function(n, params){
+  p = params[1]
+  m = params[2]
+  lambda = params[3]
+  alpha = params[4]
+  beta = params[5]
+  gamma = params[6]
+  zeta = params[7]
+  # Seuil continuité
+  g <- function(u) (p*fB(u,m,lambda)/FB(u,m,lambda)) - 
+    ((1-p)*fT(u,alpha, beta, gamma, zeta)/(1-FT(u, alpha, beta, gamma, zeta)))
+  uc <- uniroot(g, lower=0.01, upper=20)$root
+  
+  # U0 pour choisir body/tail
+  U0 <- runif(n)
+  U1 <- runif(n)
+  X <- numeric(n)
+  
+    for(i in 1:n){
+    if(U0[i] <= p){
+      X[i] <- qB(U1[i]*FB(uc,m,lambda),m,lambda)
+    } else{
+      v <- FT(uc, alpha, beta, gamma, zeta) + U1[i]*(1-FT(uc, alpha, beta, gamma, zeta))
+      X[i] <- qT(v, alpha, beta, gamma, zeta)
+    }
+  }
+    
+  return(X)
+}
+
+# Fonction de superquantile empirique
+superquantile_subgradient <- function(x, p,learning_rate, Tmax=500, epsilon = 1e-6){
+  n = length(x)
+  eta_t = numeric(Tmax + 1)
+  eta_t[1] = median(x) # initial quantile
+  ind <- function(x,seuil) ifelse(x > seuil, 1, 0)
+  for (t in 1:Tmax) {
+    F_bar_hat = sum(sapply(x, ind, eta_t[t]))/n
+    gt <- 1-(1/(1-p))* F_bar_hat    # the subgradient
+    eta_t[t+1] <- eta_t[t] - (learning_rate/sqrt(t))*gt
+    if(abs(eta_t[t+1] - eta_t[t]) < epsilon) break
+  }
+  eta_hat <- eta_t[t+1]
+  SQ_p <- eta_hat + sum(pmax(x - eta_hat, 0))/((1-p)*n)
+  return(SQ_p)
+} 
+
+quantile_superquantile_estim <- function(Qs, SQs){
+  
+    objective_function <- function(params, Qs, SQs){
+      alpha <- params[1]
+      beta  <- params[2]
+      gamma <- params[3]
+      zeta  <- params[4]
+      
+      # On évite alpha <= 0 pour stabilité
+      if(alpha <= 0 || gamma <= 0 || abs(beta) > 1) return(1e10)
+    
+      # éviter singularités
+      if(abs(alpha - 1) < 1e-2) return(1e10)
+      
+      # éviter gamma poles
+      if(abs(1/alpha - round(1/alpha)) < 1e-2) return(1e10)
+  
+      
+      err <- 0
+      for(i in 1:length(Qs)){
+        Q <- Qs[i]
+        suppressWarnings(
+          P_T_Q <- pstable(Q, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0, lower.tail = FALSE)
+        )
+        
+        z = (Q - zeta + beta*gamma*tan(pi*alpha/2))/gamma
+        # H(Q,alpha,beta,gamma,zeta)
+        H_val <- (zeta - beta * gamma * tan(pi*alpha/2)-Q) / (2*P_T_Q) + (gamma/(pi*P_T_Q)) * (gamma(1 - 1/alpha) - g_minus_1(x=z, alpha = alpha, beta = beta))
+        # erreur
+        err <- err + (SQs[i] - Q - H_val)^2
+
+        
+      }
+      if (any(!is.finite(err))) return(1e10)
+      
+      return(err)
+    }
+    
+    init_params <- c(alpha=1.2, beta=0, gamma=1, zeta=0)
+
+    res <- optim(par = init_params,
+             fn = objective_function,
+             Qs = Qs,
+             SQs = SQs,
+             method = "L-BFGS-B",
+             lower = c(1.01, -1, 0.01, -Inf),
+             upper = c(2, 1, 10, Inf))
+
+    return(res$par)
+}
+
+
+simulation_2 <- function(n, true_params, replications=50, prob_levels){
+  # params is the true parameters of stable component
+  results <- matrix(NA, nrow = replications, ncol = 4)
+  
+  for (i in 1:replications) {
+    sample <-simulate_spliced(n, c(0.2, 10, 0.2, true_params))
+    Q_hat <- sapply(prob_levels, function(p) quantile(sample, p))
+    SQ_hat <- sapply(prob_levels, function(p) superquantile_subgradient(sample,p,learning_rate = 0.05))
+    
+    estimation <- quantile_superquantile_estim(Q_hat, SQ_hat)
+    if (!is.null(estimation)) {
+      results[i, ] <- estimation
+    }
+    else results[i, ] <- c(NA,NA,NA,NA,NA,NA)
+  }
+  colnames(results) <- c( "alpha","beta","gamma" , "delta")
+  # Calcul des métriques
+ 
+  true_matrix <- matrix(rep(true_params, each = replications), nrow = replications)
+  
+  mean_estimates <- colMeans(results, na.rm = TRUE)
+  biases <- abs(mean_estimates - true_params)
+  mse <- colMeans((results - true_matrix)^2, na.rm = TRUE)
+  variances <- apply(results, 2, var, na.rm = TRUE)
+  
+  return(data.frame(Mean_Estimate = mean_estimates,
+                    Bias = biases,
+                    MSE = mse,
+                    Variance = variances))
+  
+}
+```
+
+## Estimation des paramètres: subgradient learning
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21 <- simulation_2(250,true_params=params[2,], prob_levels = seq(0.2,0.9,.1))
+sim_result_22 <- simulation_2(1e3,true_params=params[2,], prob_levels = seq(0.2,0.9,.1))
+print(sim_result_21)
+print(sim_result_22)
+```
+
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_11 <- simulation_2(250,true_params=params[1,],  prob_levels = seq(0.2,0.9,.1))
+sim_result_12 <- simulation_2(1e3,true_params=params[1,],  prob_levels = seq(0.2,0.9,.1))
+print(sim_result_11)
+print(sim_result_12)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21_v2 <- simulation_2(250,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+sim_result_22_v2 <- simulation_2(1e3,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+print(sim_result_21_v2)
+print(sim_result_22_v2)
+```
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_11_v2 <- simulation_2(250,true_params=params[1,],  prob_levels = c(0.45,0.50,0.55,0.52))
+sim_result_12_v2 <- simulation_2(1e3,true_params=params[1,],  prob_levels = c(0.45,0.50,0.55,0.52))
+print(sim_result_11_v2)
+print(sim_result_12_v2)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21_v2 <- simulation_2(250,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+sim_result_22_v2 <- simulation_2(1e3,true_params=params[2,], prob_levels = c(0.45,0.50,0.55,0.52))
+print(sim_result_21_v2)
+print(sim_result_22_v2)
+```
+
+
+
+## Lemme 3.1 (Smoothed Superquantile Optimization)
+
+```{r}
+library(stabledist)
+library(statmod)
+g_minus_1 <- function(x,alpha, beta){
+  scalar_integrand <- function(t){
+    # Changement de variable
+    r <- t^(1/alpha)
+    dr_dt <- (1/alpha) * t^(1/alpha - 1)
+    
+    trig_part <- cos(x*r - tan(pi*alpha/2)*beta*r^alpha) - 1
+    
+    val <- trig_part * r^(-2) * dr_dt
+    
+    return(val)
+  }
+  
+  n <- 200
+  gl <- statmod::gauss.quad(n, kind = "laguerre",alpha = 0)
+  t <- gl$nodes
+  w <- gl$weights
+
+  sum(w * sapply(t, scalar_integrand))  
+}
+# Topp-Leone Exponential
+fB <- function(x,m,lambda) {
+  m*lambda*exp(-lambda*x) * (1 - exp(-lambda*x))^(m-1)
+}
+
+FB <- function(x,m,lambda) {
+  (1 - exp(-lambda*x))^m
+}
+
+qB <- function(u,m,lambda) {
+  - (1 / (lambda)) * log(1 - u^(1/m))
+}
+
+# Partie haute : Stable param 0
+fT <- function(x, alpha, beta, gamma, zeta) dstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+FT <- function(x, alpha, beta, gamma, zeta) pstable(x, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+qT <- function(u, alpha, beta, gamma, zeta) qstable(u, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0)
+
+simulate_spliced <- function(n, params){
+  p = params[1]
+  m = params[2]
+  lambda = params[3]
+  alpha = params[4]
+  beta = params[5]
+  gamma = params[6]
+  zeta = params[7]
+  # Seuil continuité
+  g <- function(u) (p*fB(u,m,lambda)/FB(u,m,lambda)) - 
+    ((1-p)*fT(u,alpha, beta, gamma, zeta)/(1-FT(u, alpha, beta, gamma, zeta)))
+  uc <- uniroot(g, lower=0.01, upper=20)$root
+  
+  # U0 pour choisir body/tail
+  U0 <- runif(n)
+  U1 <- runif(n)
+  X <- numeric(n)
+  
+    for(i in 1:n){
+    if(U0[i] <= p){
+      X[i] <- qB(U1[i]*FB(uc,m,lambda),m,lambda)
+    } else{
+      v <- FT(uc, alpha, beta, gamma, zeta) + U1[i]*(1-FT(uc, alpha, beta, gamma, zeta))
+      X[i] <- qT(v, alpha, beta, gamma, zeta)
+    }
+  }
+    
+  return(X)
+}
+
+# Fonction de superquantile empirique
+superquantile_smooth <- function(X, p, mu=0.1){
+  n <- length(X)
+  losses <- X
+  upper_bound <- 1/(n*(1-p))
+  
+  dual_constraint <- function(eta){
+    q <- pmin(pmax((losses - eta)/mu + 1/n, 0), upper_bound)
+    sum(q) - 1
+  }
+  
+  eta_star <- tryCatch({
+    uniroot(dual_constraint, lower=min(losses)-mu, upper=max(losses)+mu)$root
+  }, error=function(e) quantile(losses, p))
+  
+  q_star <- pmin(pmax((losses - eta_star)/mu + 1/n, 0), upper_bound)
+  SQ_smooth <- sum(q_star * losses)
+  return(SQ_smooth)
+}
+
+quantile_superquantile_estim <- function(Qs, SQs){
+  
+    objective_function <- function(params, Qs, SQs){
+      alpha <- params[1]
+      beta  <- params[2]
+      gamma <- params[3]
+      zeta  <- params[4]
+      
+      # On évite alpha <= 0 pour stabilité
+      if(alpha <= 0 || gamma <= 0 || abs(beta) > 1) return(1e10)
+    
+      # éviter singularités
+      if(abs(alpha - 1) < 1e-2) return(1e10)
+      
+      # éviter gamma poles
+      if(abs(1/alpha - round(1/alpha)) < 1e-2) return(1e10)
+  
+      
+      err <- 0
+      for(i in 1:length(Qs)){
+        Q <- Qs[i]
+        suppressWarnings(
+          P_T_Q <- pstable(Q, alpha=alpha, beta=beta, gamma=gamma, delta=zeta, pm=0, lower.tail = FALSE)
+        )
+        
+        z = (Q - zeta + beta*gamma*tan(pi*alpha/2))/gamma
+        # H(Q,alpha,beta,gamma,zeta)
+        # H_val <- (zeta - beta * gamma * tan(pi*alpha/2)-Q) / (2*P_T_Q) + (gamma/(pi*P_T_Q)) * (gamma(1 - 1/alpha) - g_d(x=z, d=-1, alpha = alpha, beta = beta))
+        H_val <- (zeta - beta * gamma * tan(pi*alpha/2)-Q) / (2*P_T_Q) + (gamma/(pi*P_T_Q)) * (gamma(1 - 1/alpha) - g_minus_1(x=z, alpha = alpha, beta = beta))
+        # erreur
+        err <- err + (SQs[i] - Q - H_val)^2
+
+        
+      }
+      if (any(!is.finite(err))) return(1e10)
+      
+      return(err)
+    }
+    
+    init_params <- c(alpha=1.2, beta=0, gamma=1, zeta=0)
+
+    res <- optim(par = init_params,
+             fn = objective_function,
+             Qs = Qs,
+             SQs = SQs,
+             method = "L-BFGS-B",
+             lower = c(1.01, -1, 0.01, -Inf),
+             upper = c(2, 1, 10, Inf))
+
+    return(res$par)
+}
+
+
+simulation_3 <- function(n, true_params, replications=50,prob_levels = c(0.05,0.25,0.75,0.95)){
+  # params is the true parameters of stable component
+  results <- matrix(NA, nrow = replications, ncol = 4)
+  
+  for (i in 1:replications) {
+    sample <-simulate_spliced(n, c(0.2, 10, 0.2, true_params))
+    Q_hat <- sapply(prob_levels, function(p) quantile(sample, p))
+    SQ_hat <- sapply(prob_levels, function(p) superquantile_smooth(sample,p))
+    
+    estimation <- quantile_superquantile_estim(Q_hat, SQ_hat)
+    if (!is.null(estimation)) {
+      results[i, ] <- estimation
+    }
+    else results[i, ] <- c(NA,NA,NA,NA,NA,NA)
+  }
+  colnames(results) <- c( "alpha","beta","gamma" , "delta")
+  # Calcul des métriques
+ 
+  true_matrix <- matrix(rep(true_params, each = replications), nrow = replications)
+  
+  mean_estimates <- colMeans(results, na.rm = TRUE)
+  biases <- abs(mean_estimates - true_params)
+  mse <- colMeans((results - true_matrix)^2, na.rm = TRUE)
+  variances <- apply(results, 2, var, na.rm = TRUE)
+  
+  return(data.frame(Mean_Estimate = mean_estimates,
+                    Bias = biases,
+                    MSE = mse,
+                    Variance = variances))
+  
+}
+```
+
+## Estimations paramètres  (smoothed superquantile)
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_11_v1 <- simulation_3(250,true_params=params[1,],
+                               prob_levels = seq(0.2,0.9,.1))
+sim_result_11_v2 <- simulation_3(250,true_params=params[1,],
+                               prob_levels = c(0.45,0.5,0.55,0.52))
+print(sim_result_11_v1)
+print(sim_result_11_v2)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_12_v1 <- simulation_3(1e3,true_params=params[1,],
+                                prob_levels = seq(0.2,0.9,.1))
+sim_result_12_v2 <- simulation_3(1e3,true_params=params[1,],
+                               prob_levels = c(0.45,0.5,0.55,0.52))
+print(sim_result_12_v1)
+print(sim_result_12_v2)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_22_v1 <- simulation_3(1e3,true_params=params[2,],
+                                prob_levels = seq(0.2,0.9,.1))
+sim_result_22_v2 <- simulation_3(1e3,true_params=params[2,],
+                               prob_levels = c(0.45,0.5,0.55,0.52))
+print(sim_result_22_v1)
+print(sim_result_22_v2)
+```
+
+```{r}
+params = matrix(c(1.5,0,1,0,1.7,-0.5,4,10), nrow=2, byrow=T)
+sim_result_21_v1 <- simulation_3(250,true_params=params[2,],
+                               prob_levels = seq(0.2,0.9,.1))
+sim_result_21_v2 <- simulation_3(250,true_params=params[2,],
+                               prob_levels = c(0.45,0.5,0.55,0.52))
+print(sim_result_21_v1)
+print(sim_result_21_v2)
+```
+
+
+
